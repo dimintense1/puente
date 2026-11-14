@@ -1,5 +1,6 @@
 import AppKit
 import Intents
+import IOKit.pwr_mgt
 import SwiftUI
 import UserNotifications
 
@@ -25,6 +26,10 @@ final class Mirror {
         p.executableURL = URL(fileURLWithPath: exe)
         p.arguments = ["-s", serial, "--window-title", UserDefaults.standard.string(forKey: "phoneName") ?? "Tu celular",
                        "--turn-screen-off",       // la pantalla del celular se apaga mientras lo usas desde el Mac
+                       // …y sigue apagada: el celular no se bloquea por inactividad mientras la ventana está abierta
+                       // (se restaura su tiempo de pantalla al cerrar) y queda apagado al cerrar la ventana
+                       "--screen-off-timeout=86400", "--stay-awake", "--power-off-on-close",
+                       "--disable-screensaver",   // el Mac no apaga la pantalla mientras ves el celular
                        "--keyboard=uhid",         // teclado del Mac como teclado físico (tildes, ñ, atajos)
                        // Mouse como en Enlace a Windows: clic = toque, arrastrar = deslizar, rueda = scroll, entra y sale libre.
                        // Clic derecho = Atrás, medio = Inicio, botón 4 = Recientes, botón 5 = notificaciones.
@@ -40,17 +45,32 @@ final class Mirror {
         p.standardError = FileHandle.nullDevice
         p.terminationHandler = { [weak self] _ in DispatchQueue.main.async {
             self?.navBar?.close(); self?.navBar = nil
+            self?.keepMacAwake(false)
             self?.onChange?(false)
         } }
         do { try p.run(); process = p; onChange?(true) } catch { Log.info("scrcpy: \(error)"); return }
         navBar = NavBar(pid: p.processIdentifier, serial: serial)
+        keepMacAwake(true)
         // Traer la ventana al frente cuando aparezca
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             NSRunningApplication(processIdentifier: p.processIdentifier)?.activate()
         }
     }
 
-    func close() { navBar?.close(); navBar = nil; process?.terminate(); process = nil }
+    func close() { navBar?.close(); navBar = nil; keepMacAwake(false); process?.terminate(); process = nil }
+
+    /// Mientras la ventana del celular está abierta, el Mac no apaga la pantalla ni se duerme por inactividad,
+    /// también con batería (como cuando reproduces un video). Se suelta al cerrar la ventana.
+    private var awake: IOPMAssertionID = 0
+    private func keepMacAwake(_ on: Bool) {
+        if on, awake == 0 {
+            IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                                        IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                        "Puente: viendo el celular en el Mac" as CFString, &awake)
+        } else if !on, awake != 0 {
+            IOPMAssertionRelease(awake); awake = 0
+        }
+    }
 }
 
 /// Barra Atrás · Inicio · Recientes pegada bajo la ventana del celular (como en Enlace a Windows).
